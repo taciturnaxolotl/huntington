@@ -185,6 +185,10 @@ class HuntingtonSession {
         let cookieNames = cookieStorage.cookies?.map(\.name) ?? []
         guard cookieNames.contains("PD-ID") else {
             print("[auth] pkmslogin failed (\(status)), body: \(String(data: data, encoding: .utf8)?.prefix(500) ?? "")")
+            if let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let op = body["operation"] as? String, op == "acct_locked" {
+                throw HuntingtonError.authFailed("Your account is locked. You need to reset your password on the Huntington website before signing in.")
+            }
             if status == 200 || status == 302 {
                 throw HuntingtonError.authFailed("Incorrect username or password")
             }

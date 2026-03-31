@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct LoginView: View {
     var session: HuntingtonSession
@@ -11,6 +12,7 @@ struct LoginView: View {
     @State private var errorMessage: String?
     @State private var deliveryOptions: [HuntingtonSession.OTPDeliveryOption] = []
     @State private var phase: Phase = .credentials
+    @State private var showForgotPassword = false
 
     enum Phase { case credentials, deliverySelection, codeEntry }
 
@@ -72,6 +74,9 @@ struct LoginView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
+            .sheet(isPresented: $showForgotPassword) {
+                ForgotPasswordSheet()
+            }
         }
     }
 
@@ -109,6 +114,11 @@ struct LoginView: View {
         .disabled(isLoading || username.isEmpty || password.isEmpty)
         .padding(.horizontal, 24)
         .padding(.top, 24)
+
+        Button("Forgot Password?") { showForgotPassword = true }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.top, 8)
     }
 
     @ViewBuilder
@@ -235,5 +245,39 @@ struct LoginView: View {
     private func hideKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
                                         to: nil, from: nil, for: nil)
+    }
+}
+
+// MARK: - Forgot Password WebView
+
+struct ForgotPasswordView: UIViewRepresentable {
+    private let url = URL(string: "https://onlinebanking.huntington.com/rol/Retail/SelfService/ForgotPassword/BeginForgotPasswordFlow/4")!
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+
+struct ForgotPasswordSheet: View {
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ForgotPasswordView()
+                .ignoresSafeArea(edges: .bottom)
+                .navigationTitle("Reset Password")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
     }
 }

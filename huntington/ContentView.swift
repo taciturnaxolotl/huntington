@@ -16,19 +16,34 @@ struct ContentView: View {
     private var client: HuntingtonClient { HuntingtonClient(session: session) }
 
     var body: some View {
-        TabView {
-            Tab("Home", systemImage: "house") {
-                HomeTab(accounts: accounts, transactions: transactions,
-                        isLoading: isLoading, errorMessage: errorMessage,
-                        isAuthenticated: session.isAuthenticated,
-                        onRefresh: loadData, onSignIn: { showLogin = true })
-            }
-            Tab("Zelle", systemImage: "arrow.left.arrow.right") {
-                ZelleTab()
-            }
-            Tab("Profile", systemImage: "person.circle") {
-                ProfileTab(accounts: accounts, displayName: session.displayName,
-                           onSignOut: { session.signOut() })
+        Group {
+            if session.isAuthenticated {
+                TabView {
+                    Tab("Home", systemImage: "house") {
+                        HomeTab(accounts: accounts, transactions: transactions,
+                                isLoading: isLoading, errorMessage: errorMessage,
+                                onRefresh: loadData)
+                    }
+                    Tab("Zelle", systemImage: "arrow.left.arrow.right") {
+                        ZelleTab()
+                    }
+                    Tab("Profile", systemImage: "person.circle") {
+                        ProfileTab(accounts: accounts, displayName: session.displayName,
+                                   onSignOut: { session.signOut() })
+                    }
+                }
+            } else {
+                NavigationStack {
+                    ContentUnavailableView("Not Signed In", systemImage: "lock",
+                        description: Text("Tap Sign In to connect your Huntington account."))
+                    .toolbar {
+                        ToolbarItem(placement: .principal) { NeoWordmark() }
+                        ToolbarItem(placement: .primaryAction) {
+                            Button("Sign In") { showLogin = true }
+                        }
+                    }
+                    .navigationBarTitleDisplayMode(.inline)
+                }
             }
         }
         .overlay {
@@ -115,9 +130,7 @@ struct HomeTab: View {
     let transactions: [Transaction]
     let isLoading: Bool
     let errorMessage: String?
-    let isAuthenticated: Bool
     let onRefresh: () async -> Void
-    let onSignIn: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -126,9 +139,6 @@ struct HomeTab: View {
                     ProgressView("Loading…")
                 } else if let error = errorMessage {
                     ContentUnavailableView(error, systemImage: "exclamationmark.triangle")
-                } else if !isAuthenticated {
-                    ContentUnavailableView("Not Signed In", systemImage: "lock",
-                        description: Text("Tap Sign In to connect your Huntington account."))
                 } else {
                     List {
                         if !accounts.isEmpty {
@@ -156,11 +166,6 @@ struct HomeTab: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) { NeoWordmark() }
-                if !isAuthenticated {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button("Sign In", action: onSignIn)
-                    }
-                }
             }
         }
     }
