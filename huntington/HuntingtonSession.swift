@@ -59,7 +59,11 @@ class HuntingtonSession {
             let url = base + "/api/mobile-customer-accounts/1.11/contexts/\(contextId)/customers/\(customerId)/accounts?refresh=false"
             let _: AccountsResponse = try await fetch(url)
             isAuthenticated = true
+        } catch is URLError {
+            // Network unavailable — trust the cached session, loadData() will surface the error
+            isAuthenticated = true
         } catch {
+            // Auth failure (e.g. 401 expired session) — force re-login
             clearState()
         }
     }
