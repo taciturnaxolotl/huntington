@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalAuthentication
 
 struct ContentView: View {
     @State private var session = HuntingtonSession()
@@ -7,8 +8,116 @@ struct ContentView: View {
     @State private var showLogin = false
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var isInitializing = true
+    @State private var biometricLocked = false
+    @State private var backgroundedAt: Date?
+    private let lockTimeout: TimeInterval = 15 * 60
 
     private var client: HuntingtonClient { HuntingtonClient(session: session) }
+
+    var body: some View {
+        TabView {
+            Tab("Home", systemImage: "house") {
+                HomeTab(accounts: accounts, transactions: transactions,
+                        isLoading: isLoading, errorMessage: errorMessage,
+                        isAuthenticated: session.isAuthenticated,
+                        onRefresh: loadData, onSignIn: { showLogin = true })
+            }
+            Tab("Zelle", systemImage: "arrow.left.arrow.right") {
+                ZelleTab()
+            }
+            Tab("Profile", systemImage: "person.circle") {
+                ProfileTab(accounts: accounts, displayName: session.displayName,
+                           onSignOut: { session.signOut() })
+            }
+        }
+        .overlay {
+            if isInitializing || biometricLocked || scenePhase != .active {
+                ZStack {
+                    Color(.systemBackground).ignoresSafeArea()
+                    NeoWordmark(font: .title.bold())
+                }
+                .onTapGesture {
+                    if biometricLocked { Task { await unlockWithBiometrics() } }
+                }
+            }
+        }
+        .sheet(isPresented: $showLogin) {
+            LoginView(session: session)
+        }
+        .task {
+            await session.initialize()
+            isInitializing = false
+            if session.isAuthenticated {
+                await unlockWithBiometrics()
+            } else {
+                showLogin = true
+            }
+        }
+        .onChange(of: session.isAuthenticated) { _, authenticated in
+            if authenticated { Task { await loadData() } }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                backgroundedAt = Date()
+            case .active:
+                if let t = backgroundedAt, Date().timeIntervalSince(t) >= lockTimeout {
+                    biometricLocked = true
+                    Task { await unlockWithBiometrics() }
+                }
+                backgroundedAt = nil
+            default:
+                break
+            }
+        }
+    }
+
+    @Environment(\.scenePhase) private var scenePhase
+
+    private func unlockWithBiometrics() async {
+        let context = LAContext()
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
+            await loadData()
+            return
+        }
+        biometricLocked = true
+        do {
+            let ok = try await context.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: "Authenticate to access your accounts")
+            if ok {
+                biometricLocked = false
+                await loadData()
+            }
+        } catch {
+            // Biometrics failed or cancelled — let them try again by tapping
+        }
+    }
+
+    private func loadData() async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        do {
+            accounts = try await client.getAccounts()
+            transactions = try await client.getRecentTransactions(accounts: accounts)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Tabs
+
+struct HomeTab: View {
+    let accounts: [Account]
+    let transactions: [Transaction]
+    let isLoading: Bool
+    let errorMessage: String?
+    let isAuthenticated: Bool
+    let onRefresh: () async -> Void
+    let onSignIn: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -17,7 +126,7 @@ struct ContentView: View {
                     ProgressView("Loading…")
                 } else if let error = errorMessage {
                     ContentUnavailableView(error, systemImage: "exclamationmark.triangle")
-                } else if !session.isAuthenticated {
+                } else if !isAuthenticated {
                     ContentUnavailableView("Not Signed In", systemImage: "lock",
                         description: Text("Tap Sign In to connect your Huntington account."))
                 } else {
@@ -32,7 +141,7 @@ struct ContentView: View {
                             }
                         }
                         if !transactions.isEmpty {
-                            Section("Last 30 Days") {
+                            Section("Recent") {
                                 ForEach(transactions) { tx in
                                     NavigationLink(destination: TransactionDetailView(transaction: tx, accounts: accounts)) {
                                         TransactionRow(transaction: tx)
@@ -41,47 +150,87 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .refreshable { await loadData() }
+                    .refreshable { await onRefresh() }
                 }
             }
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    NeoWordmark()
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    if session.isAuthenticated {
-                        Button("Sign Out", role: .destructive) { session.signOut() }
-                    } else {
-                        Button("Sign In") { showLogin = true }
+                ToolbarItem(placement: .principal) { NeoWordmark() }
+                if !isAuthenticated {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Sign In", action: onSignIn)
                     }
                 }
             }
         }
-        .sheet(isPresented: $showLogin) {
-            LoginView(session: session)
-        }
-        .task {
-            await session.initialize()
-            if session.isAuthenticated {
-                await loadData()
-            } else {
-                showLogin = true
+    }
+}
+
+struct ZelleTab: View {
+    var body: some View {
+        NavigationStack {
+            ContentUnavailableView("Zelle", systemImage: "arrow.left.arrow.right",
+                description: Text("Zelle support coming soon."))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) { NeoWordmark() }
             }
         }
-        .onChange(of: session.isAuthenticated) { _, authenticated in
-            if authenticated { Task { await loadData() } }
-        }
     }
+}
 
-    private func loadData() async {
-        isLoading = true
-        errorMessage = nil
-        defer { isLoading = false }
-        do {
-            accounts = try await client.getAccounts()
-            transactions = try await client.getRecentTransactions(accounts: accounts)
-        } catch {
-            errorMessage = error.localizedDescription
+struct ProfileTab: View {
+    let accounts: [Account]
+    let displayName: String
+    let onSignOut: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !displayName.isEmpty {
+                    Section {
+                        HStack {
+                            Spacer()
+                            VStack(spacing: 4) {
+                                Image(systemName: "person.circle.fill")
+                                    .font(.system(size: 56))
+                                    .foregroundStyle(.secondary)
+                                Text(displayName.capitalized)
+                                    .font(.title3.weight(.semibold))
+                            }
+                            .padding(.vertical, 8)
+                            Spacer()
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+
+                if !accounts.isEmpty {
+                    Section("Accounts") {
+                        ForEach(accounts) { acct in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(acct.alias).fontWeight(.medium)
+                                    Text(acct.accountType).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(acct.number).font(.caption).foregroundStyle(.secondary)
+                                    Text("Routing: \(acct.routingNumber)").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section("App") {
+                    Button("Sign Out", role: .destructive, action: onSignOut)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) { NeoWordmark() }
+            }
         }
     }
 }

@@ -4,32 +4,36 @@ A native iOS client for Huntington Bank, built by reverse-engineering the privat
 
 The canonical repo for this is hosted on tangled over at [`dunkirk.sh/huntington`](https://tangled.org/dunkirk.sh/huntington)
 
+<p align="center">
+    <img src="https://raw.githubusercontent.com/taciturnaxolotl/carriage/main/.github/images/line-break.svg" />
+</p>
+
 ## API
 
-All API traffic goes through `m.huntington.com`. There are two namespaces:
+All traffic goes to `m.huntington.com` under two namespaces:
 
-- `/api/mobile-authentication/1.8/` — auth flow (login, OTP, device registration)
-- `/api/mobile-customer-accounts/1.11/` — account data (balances, transactions)
+- `mobile-authentication/1.8` — login, OTP, device registration
+- `mobile-customer-accounts/1.11` — accounts, balances, transactions
 
-### Authentication
+### Session model
 
-Every authenticated request requires two things:
+Every authenticated request needs two things:
 
-- Session cookies `PD-ID` and `PD-S-SESSION-ID` (set by IBM Security Verify / DataPower after login)
-- An `x-auth-receipt` header — a short-lived rolling token issued by the auth layer
+- **Cookies** — `PD-ID` and `PD-S-SESSION-ID`, set by IBM Security Verify after login
+- **`x-auth-receipt`** — a rolling token that the server rotates on every response; using a stale one yields a 401
 
-The receipt **rotates on every response**: each API call returns a new `x-auth-receipt` that must be used for the next call. Using a stale receipt yields a 401.
+All requests also carry:
 
-#### Headers (all requests)
+| Header | Value |
+| --- | --- |
+| `x-channel` | `MOBILE` |
+| `x-context-id` | lowercase UUID, generated once per session |
+| `x-auth-receipt` | current receipt token |
+| `user-agent` | `HuntingtonMobileBankingIOS/6.74.115` |
 
-| Header           | Value                                  |
-| ---------------- | -------------------------------------- |
-| `x-channel`      | `MOBILE`                               |
-| `x-context-id`   | UUID generated per session (lowercase) |
-| `x-auth-receipt` | Rolling receipt token                  |
-| `user-agent`     | `HuntingtonMobileBankingIOS/6.74.115`  |
+### Login
 
-#### Login flow (new device / OTP required)
+#### Step 1 — establish session
 
 ```
 POST /api/mobile-authentication/1.8/mobile-init
@@ -37,129 +41,158 @@ POST /api/mobile-authentication/1.8/mobile-init
   → 201
 
 POST /pkmslogin.form
-  body: login-form-type=pwd&userName=...&password=...
-  → 302 (sets PD-ID, PD-S-SESSION-ID cookies)
+  content-type: application/x-www-form-urlencoded
+  body: login-form-type=pwd&userName=…&password=…
+  → 302  (sets PD-ID, PD-S-SESSION-ID cookies)
 
 GET /api/mobile-authentication/1.8/contexts/{ctx}/authentication-receipt
   ?olbLoginId={username}&loginType=USER_PASS
-  → 200, x-auth-receipt header, body: { customerId }
+  → 200  x-auth-receipt: <token>
+         body: { customerId }
+```
 
+#### Step 2 — device check
+
+```
 POST /api/mobile-authentication/1.8/contexts/{ctx}/second-factors
-  body: { fingerprint, olbLoginId, policy: "ANDROID", profile: "MOBILE",
-          deviceId, token, fraudSessionId, loginType, flowId }
-  → 201, body: { secondFactorId, passed, registrationData }
-  # passed=true → skip to activate-customer (trusted device)
-  # passed=false → OTP required
+  body: {
+    olbLoginId, policy: "ANDROID", profile: "MOBILE",
+    deviceId, token,          ← persisted device identity; empty string on first run
+    fraudSessionId,           ← random UUID, no dashes
+    loginType: "USER_PASS", flowId: "",
+    fingerprint: { attributes: { os, osname, numberOfProcessors, localeName, rooted, appVersion } }
+  }
+  → 201  body: { secondFactorId, passed, registrationData: { token } }
+```
 
-GET /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/delivery-options
-  → 200, body: { phoneNumbers: [{id, value}], emailAddresses: [{id, value}] }
+`passed: true` means the device is trusted — skip to [activate](#step-4--activate). `passed: false` means OTP is required.
 
-PUT /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/delivery-options/{optionId}
+> **Note:** `policy` must be `"ANDROID"`. The `"IOS"` value triggers a server bug that causes 500s on `otp/status`.
+
+#### Step 3 — OTP (new device only)
+
+```
+GET  /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/delivery-options
+  → 200  body: { phoneNumbers: [{id, value}], emailAddresses: [{id, value}] }
+
+PUT  /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/delivery-options/{optionId}
   body: {}
-  → 200 (sends OTP to selected phone/email)
+  → 200  (triggers SMS or email with code)
 
-PUT /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/status
+PUT  /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/otp/status
   body: { otpValue: "123456", flowId: "" }
-  → 200, body: { passed: true }, rotates x-auth-receipt
+  → 200  body: { passed: true }  x-auth-receipt: <rotated>
 
-GET /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/v2/ia-challenge-question
-  → 200, body: {} (no challenge), rotates x-auth-receipt again
+GET  /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/v2/ia-challenge-question
+  → 200  body: {}  x-auth-receipt: <rotated again>
+```
 
+The receipt rotates twice through OTP verification — `otp/status` rotates it once, `ia-challenge-question` rotates it again. Use the receipt from `ia-challenge-question` for the activate call.
+
+#### Step 4 — activate
+
+```
 POST /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/customers
   body: { secondFactorId, fraudSessionId }
-  → 201, body: { customer: { customerId, name, ... } }
+  → 201  body: { customer: { customerId, customerType, name, displayName } }
+```
 
+#### Step 5 — register device (background, OTP path only)
+
+```
 POST /api/mobile-authentication/1.8/contexts/{ctx}/second-factors/{sfId}/registrations
   body: { deviceName: "iPhone" }
-  → 201, body: { registrationData: { token } }
-  # Save token — used in future second-factors calls to skip OTP
+  → 201  body: { registrationData: { deviceId, token } }
 ```
 
-#### Login flow (trusted device, `passed=true`)
+Save the `token` — pass it in `second-factors` on future logins to skip OTP.
 
-Same as above through `second-factors`, then jump straight to `activate-customer`. No OTP, no `ia-challenge-question`.
-
-### Account data
+### Accounts
 
 ```
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/accounts
-  ?refresh=false
-  → 200, body: { groups: [{ accountCategory, accounts: [{ accountId, accountType,
-                              nickName, availableBalance, currentBalance,
-                              maskedAccountNumber, routingNumber }] }] }
+GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/accounts?refresh=false
+  → 200  body: {
+    groups: [{
+      accountCategory,   ← e.g. "CASH"
+      accounts: [{
+        accountId, accountType, nickName,
+        availableBalance, currentBalance,
+        maskedAccountNumber, routingNumber
+      }]
+    }]
+  }
+```
 
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/last-login
-  → 200, body: { lastLogin: "2026-03-31T20:12:45.043Z" }
+### Customer info
 
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/customer-contacts
-  → 200, body: { baseContacts: { postalAddress, phoneNumbers, emailId },
-                  alertContacts: { alertEmails, alertPhones } }
+```
+GET …/customers/{customerId}/last-login
+  → 200  body: { lastLogin: "2026-03-31T20:12:45.043Z" }
 
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/customer-custom-attribute
-  → 200, body: feature flag map (UI state, onboarding flags, badge counts)
+GET …/customers/{customerId}/customer-contacts
+  → 200  body: {
+    baseContacts: { postalAddress, phoneNumbers: { cellPhone }, emailId },
+    alertContacts: { alertEmails, alertPhones }
+  }
 ```
 
 ### Transactions
 
-There are three transaction endpoints per account, each returning a different slice:
+Three endpoints per account, each a different slice:
 
 ```
-# Combined posted + pending (most recent page, no date filter)
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/deposits/{accountId}/transactions
-  → 200, body: { items: [...] }
-  # items have transactionCategory: "history" or "pending"
-  # Returns a cursor in the last item for pagination (see below)
+# Recent posted + pending transactions (paginated)
+GET …/deposits/{accountId}/transactions
+GET …/deposits/{accountId}/transactions?textRecordControl={cursor}
+  → 200  body: { items: [...] }
+  # transactionCategory: "history" | "pending"
 
-# Paginate further back using a cursor from the previous response
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/deposits/{accountId}/transactions
-  ?textRecordControl={cursor}
-  → 200, body: { items: [...] }
-
-# Posted transactions only (savings/interest accounts use this endpoint)
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/deposits/{accountId}/transaction-history
-  → 200, body: { items: [...] }
+# Posted transactions only (savings/interest accounts)
+GET …/deposits/{accountId}/transaction-history
+  → 200  body: { items: [...] }
 
 # Pending transactions only
-GET /api/mobile-customer-accounts/1.11/contexts/{ctx}/customers/{customerId}/deposits/{accountId}/v2/pending-transactions
-  → 200, body: { items: [...], inProcessTransactionExists, overdraftIndicator,
-                  idaResponse: { totalIdaAmount, defaultIdaAmount, ... } }
+GET …/deposits/{accountId}/v2/pending-transactions
+  → 200  body: {
+    items: [...],
+    inProcessTransactionExists,
+    overdraftIndicator,
+    idaResponse: { totalIdaAmount, defaultIdaAmount, remainingAmount, … }
+  }
 ```
 
-The `textRecordControl` cursor is an opaque string embedded in the transaction data — it encodes account number, account type, and date boundaries for the next page. Pass it verbatim to fetch the next batch.
+The `textRecordControl` cursor is an opaque string returned by the server — it encodes account number, type, and date range for the next page. Pass it verbatim to page back through history.
 
-#### Posted transaction fields
+#### Transaction fields
 
-| Field                            | Description                               |
-| -------------------------------- | ----------------------------------------- |
-| `transactionCategory`            | `"history"` or `"pending"`                |
-| `transactionAmount`              | Amount as string (always positive)        |
-| `runningBalance`                 | Balance after this transaction            |
-| `postedDate`                     | `YYYY-MM-DD`                              |
-| `payeeName`                      | Merchant/payee name (posted)              |
-| `transactionTypeDescription`     | e.g. `"Direct Deposit"`, `"Transfer"`     |
-| `imageId`                        | Opaque ID (used as stable transaction ID) |
-| `referenceNumber`                | Bank reference number                     |
-| `memos`                          | Array of memo strings                     |
-| `merchantCity` / `merchantState` | Card transaction location                 |
-| `oysa.isZelleTransaction`        | Whether this is a Zelle transfer          |
+Posted (`transactionCategory: "history"`):
 
-#### Pending transaction fields
+| Field | Notes |
+| --- | --- |
+| `transactionAmount` | Always positive (string) |
+| `runningBalance` | Balance after this transaction (string) |
+| `postedDate` | `YYYY-MM-DD` |
+| `payeeName` | Merchant/payee name |
+| `transactionTypeDescription` | e.g. `"Direct Deposit"`, `"Transfer"` |
+| `imageId` | Stable transaction ID |
+| `memos` | Array of memo strings |
+| `merchantCity` / `merchantState` | Card transaction location |
+| `oysa.isZelleTransaction` | Whether this is a Zelle transfer |
 
-| Field                                     | Description            |
-| ----------------------------------------- | ---------------------- |
-| `transactionType` / `transactionTypeDesc` | Type description       |
-| `totalTransactionDebitAmount`             | Debit amount (string)  |
-| `postedTransactionCreditAmount`           | Credit amount (string) |
-| `memo`                                    | Memo string            |
+Pending (`transactionCategory: "pending"`):
 
-### Notes
+| Field | Notes |
+| --- | --- |
+| `transactionType` / `transactionTypeDesc` | Type description |
+| `totalTransactionDebitAmount` | Debit amount (string) |
+| `postedTransactionCreditAmount` | Credit amount (string) |
+| `memo` | Memo string |
 
-- The `x-context-id` UUID must be **lowercase** — uppercase UUIDs cause 500 errors on `otp/status`
-- `second-factors` must use `policy: "ANDROID"` — the `"IOS"` policy path has a server-side bug that causes 500 on `otp/status`
-- `pkmslogin.form` uses HTTP/2 and occasionally resets the connection (-1005); retry with a fresh context ID
-- Session state (context ID, receipt, customer ID, cookies) can be persisted and reused across app launches — validate by hitting the accounts endpoint on startup
-- The transactions endpoint returns a rolling window of recent items (not a fixed 30-day window); use `textRecordControl` pagination to go further back
-- The `transactions` endpoint mixes posted and pending; `transaction-history` and `v2/pending-transactions` split them out separately
+### Gotchas
+
+- `x-context-id` must be **lowercase** — uppercase UUIDs cause 500s on `otp/status`
+- `pkmslogin.form` occasionally resets the HTTP/2 connection (NSURLError -1005); retry with a fresh context ID
+- Session state (context ID, receipt, customer ID, cookies) survives app restarts — validate on launch by hitting the accounts endpoint
 
 <p align="center">
     <img src="https://raw.githubusercontent.com/taciturnaxolotl/carriage/main/.github/images/line-break.svg" />

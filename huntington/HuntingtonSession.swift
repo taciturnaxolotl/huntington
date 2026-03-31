@@ -23,6 +23,7 @@ class HuntingtonSession {
     private(set) var contextId = ""
     private(set) var authReceipt = ""
     private(set) var customerId = ""
+    private(set) var displayName = ""
 
     private let base = "https://m.huntington.com"
     private let stateKey = "huntington_auth_state_v2"
@@ -88,7 +89,7 @@ class HuntingtonSession {
 
         try await seedCookies()
         var lastError: Error?
-        for attempt in 1...3 {
+        for _ in 1...3 {
             do {
                 try await mobileInit(contextId: ctx)
                 try await pkmsLogin(username: username, password: password, contextId: ctx)
@@ -299,8 +300,7 @@ class HuntingtonSession {
         var req = agwRequest("POST", path, ctx: contextId, receipt: authReceipt)
         req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "content-type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["deviceName": "iPhone"])
-        guard let (data, resp) = try? await session.data(for: req) else { return }
-        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard let (data, _) = try? await session.data(for: req) else { return }
         if let reg = try? JSONDecoder().decode(RegistrationResponse.self, from: data),
            let token = reg.registrationData?.token, !token.isEmpty {
             UserDefaults.standard.set(token, forKey: "huntington_device_token")
@@ -312,9 +312,7 @@ class HuntingtonSession {
         let path = "/api/mobile-authentication/1.8/contexts/\(contextId)/second-factors/\(secondFactorId)/v2/ia-challenge-question"
         let req = agwRequest("GET", path, ctx: contextId, receipt: authReceipt)
         let (_, resp) = try await session.data(for: req)
-        let http = resp as? HTTPURLResponse
-        let status = http?.statusCode ?? 0
-        return http?.value(forHTTPHeaderField: "x-auth-receipt") ?? authReceipt
+        return (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-auth-receipt") ?? authReceipt
     }
 
     private func activateCustomer(contextId: String, authReceipt: String,
@@ -329,6 +327,9 @@ class HuntingtonSession {
         guard status == 200 || status == 201 else {
             print("[auth] activate-customer failed (\(status)): \(String(data: data, encoding: .utf8) ?? "")")
             throw HuntingtonError.authFailed("Could not activate session (\(status))")
+        }
+        if let result = try? JSONDecoder().decode(ActivateCustomerResponse.self, from: data) {
+            displayName = result.customer.displayName
         }
     }
 
@@ -491,6 +492,11 @@ private struct DeliveryOptionsResponse: Decodable {
 
 private struct OTPStatusResponse: Decodable {
     let passed: Bool
+}
+
+private struct ActivateCustomerResponse: Decodable {
+    struct Customer: Decodable { let displayName: String }
+    let customer: Customer
 }
 
 private struct RegistrationResponse: Decodable {
