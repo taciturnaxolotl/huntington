@@ -3,7 +3,8 @@ import Foundation
 @MainActor
 class HuntingtonClient {
     private let session: HuntingtonSession
-    private let bankingHost = "https://m.huntington.com"
+    private let base = "https://m.huntington.com"
+    private let apiBase = "/api/mobile-customer-accounts/1.11"
 
     init(session: HuntingtonSession) {
         self.session = session
@@ -11,78 +12,27 @@ class HuntingtonClient {
 
     // MARK: - Accounts
 
-    func getAccounts() async throws -> AccountsResponse {
-        try await session.fetch("\(bankingHost)//dmm/fm-p/accounts/get/all.action?_=\(ts())")
+    func getAccounts() async throws -> [Account] {
+        let url = "\(base)\(apiBase)/contexts/\(session.contextId)/customers/\(session.customerId)/accounts?refresh=false"
+        let response: AccountsResponse = try await session.fetch(url)
+        return response.groups.flatMap { $0.accounts }.map { Account(raw: $0) }
     }
 
     // MARK: - Transactions
 
-    func getTransactions(accountIds: [Int], startDate: String, endDate: String) async throws -> CalendarResponse {
-        let ids = accountIds.map { "productIds=\($0)" }.joined(separator: "&")
-        let url = "\(bankingHost)//dmm/fm-p/financialcalendar/get.action"
-            + "?startStr=\(startDate)&endStr=\(endDate)&\(ids)"
-            + "&includeBalances=false&includeSystemPatterns=false&_=\(ts())"
-        return try await session.fetch(url)
+    func getTransactions(account: Account) async throws -> [Transaction] {
+        let encodedId = account.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? account.id
+        let url = "\(base)\(apiBase)/contexts/\(session.contextId)/customers/\(session.customerId)/deposits/\(encodedId)/transactions"
+        let response: TransactionsResponse = try await session.fetch(url)
+        return response.items.enumerated().map { Transaction(raw: $0.element, accountId: account.id, index: $0.offset) }
     }
 
-    func getRecentTransactions(accounts: [Account], days: Int = 30) async throws -> [Transaction] {
-        let eligibleIds = accounts
-            .filter { $0.eligibleWidgets.contains("financial-calendar") }
-            .map { $0.id }
-        guard !eligibleIds.isEmpty else { return [] }
-
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        let end = Date()
-        let start = Calendar.current.date(byAdding: .day, value: -days, to: end)!
-
-        let calendar = try await getTransactions(
-            accountIds: eligibleIds,
-            startDate: fmt.string(from: start),
-            endDate: fmt.string(from: end)
-        )
-        return flatten(calendar)
+    func getRecentTransactions(accounts: [Account]) async throws -> [Transaction] {
+        var all: [Transaction] = []
+        for account in accounts {
+            let txs = (try? await getTransactions(account: account)) ?? []
+            all.append(contentsOf: txs)
+        }
+        return all.sorted { $0.date > $1.date }
     }
-
-    // MARK: - Categories
-
-    func getCategories() async throws -> CategoriesResponse {
-        try await session.fetch("\(bankingHost)//dmm/fm-p/categories/get/all.action?_=\(ts())")
-    }
-
-    // MARK: - Helpers
-
-    private func flatten(_ response: CalendarResponse) -> [Transaction] {
-        guard let result = response.result else { return [] }
-        return result.days
-            .flatMap { date, day in
-                day.transactions.map {
-                    Transaction(
-                        id: $0.id, accId: $0.accId, name: $0.name,
-                        amount: $0.amount, catId: $0.catId,
-                        transactionType: $0.transactionType,
-                        date: String(date.prefix(10))
-                    )
-                }
-            }
-            .sorted { $0.date > $1.date }
-    }
-
-    private func ts() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
-}
-
-// MARK: - Categories types (minimal)
-
-struct CategoriesResponse: Decodable {
-    let result: [Category]
-}
-
-struct Category: Decodable, Identifiable {
-    let catId: Int
-    let catName: String
-    let catHexrgbcolor: String
-    let catIsIncome: Bool
-    let categories: [Category]
-
-    var id: Int { catId }
 }

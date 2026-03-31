@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var session = HuntingtonSession()
+    @State private var session = HuntingtonSession()
     @State private var accounts: [Account] = []
     @State private var transactions: [Transaction] = []
     @State private var showLogin = false
@@ -44,8 +44,10 @@ struct ContentView: View {
                     .refreshable { await loadData() }
                 }
             }
-            .navigationTitle("Huntington")
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    NeoWordmark()
+                }
                 ToolbarItem(placement: .primaryAction) {
                     if session.isAuthenticated {
                         Button("Sign Out", role: .destructive) { session.signOut() }
@@ -55,8 +57,6 @@ struct ContentView: View {
                 }
             }
         }
-        // Hidden WKWebView kept in hierarchy for API calls
-        .background(WebViewRepresentable(webView: session.webView).frame(width: 0, height: 0))
         .sheet(isPresented: $showLogin) {
             LoginView(session: session)
         }
@@ -78,10 +78,7 @@ struct ContentView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            let response = try await client.getAccounts()
-            accounts = response.result.entities
-                .flatMap { $0.userConnection.accounts }
-                .filter { $0.active && !$0.closed }
+            accounts = try await client.getAccounts()
             transactions = try await client.getRecentTransactions(accounts: accounts)
         } catch {
             errorMessage = error.localizedDescription
@@ -113,7 +110,17 @@ struct TransactionRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(transaction.name).lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(transaction.name).lineLimit(1)
+                    if transaction.isPending {
+                        Text("Pending")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                }
                 Text(transaction.date).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -128,7 +135,7 @@ struct AccountDetailView: View {
     let allTransactions: [Transaction]
 
     private var transactions: [Transaction] {
-        allTransactions.filter { $0.accId == account.id }
+        allTransactions.filter { $0.accountId == account.id }
     }
 
     var body: some View {
@@ -142,8 +149,8 @@ struct AccountDetailView: View {
                         Text("Available Balance")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        if account.availableBalance != account.balance {
-                            Text("\(account.balance, format: .currency(code: "USD")) current")
+                        if account.availableBalance != account.currentBalance {
+                            Text("\(account.currentBalance, format: .currency(code: "USD")) current")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -156,7 +163,7 @@ struct AccountDetailView: View {
 
             Section("Account Info") {
                 LabeledContent("Account", value: account.number)
-                LabeledContent("Type", value: account.huntingtonType)
+                LabeledContent("Type", value: account.accountType)
             }
 
             if transactions.isEmpty {
@@ -184,7 +191,7 @@ struct TransactionDetailView: View {
     let accounts: [Account]
 
     private var account: Account? {
-        accounts.first { $0.id == transaction.accId }
+        accounts.first { $0.id == transaction.accountId }
     }
 
     private var isCredit: Bool { transaction.amount >= 0 }
@@ -218,11 +225,33 @@ struct TransactionDetailView: View {
                     LabeledContent("Account", value: "\(account.alias) \(account.number)")
                 }
                 LabeledContent("Type", value: isCredit ? "Credit" : "Debit")
+                if let city = transaction.merchantCity, let state = transaction.merchantState {
+                    LabeledContent("Location", value: "\(city), \(state)")
+                } else if let city = transaction.merchantCity {
+                    LabeledContent("Location", value: city)
+                }
+                if let balance = transaction.runningBalance {
+                    LabeledContent("Balance After", value: balance, format: .currency(code: "USD"))
+                }
                 LabeledContent("Transaction ID", value: String(transaction.id))
             }
         }
         .navigationTitle(transaction.name)
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct NeoWordmark: View {
+    var font: Font = .headline
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("huntington")
+            Text("::").foregroundStyle(Color.accentColor)
+            Text("neo")
+        }
+        .font(font)
+        .fontDesign(.monospaced)
     }
 }
 
