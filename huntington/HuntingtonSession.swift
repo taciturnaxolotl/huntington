@@ -19,6 +19,7 @@ enum HuntingtonError: LocalizedError {
 @Observable
 class HuntingtonSession {
     var isAuthenticated = false
+    private(set) var sessionError: String? = nil
 
     private(set) var contextId = ""
     private(set) var authReceipt = ""
@@ -63,8 +64,8 @@ class HuntingtonSession {
             // Network unavailable — trust the cached session, loadData() will surface the error
             isAuthenticated = true
         } catch {
-            // Auth failure (e.g. 401 expired session) — force re-login
             clearState()
+            sessionError = error.localizedDescription
         }
     }
 
@@ -118,6 +119,7 @@ class HuntingtonSession {
             self.customerId = custId
             saveState()
             isAuthenticated = true
+            sessionError = nil
             return .success
         } else {
             // New device — server requires OTP before trusting
@@ -149,6 +151,7 @@ class HuntingtonSession {
         self.customerId = pendingCustId
         saveState()
         isAuthenticated = true
+        sessionError = nil
         Task { await registerDevice(contextId: ctx, authReceipt: receipt2, secondFactorId: sfId) }
     }
 

@@ -138,7 +138,14 @@ struct HomeTab: View {
                 if isLoading {
                     ProgressView("Loading…")
                 } else if let error = errorMessage {
-                    ContentUnavailableView(error, systemImage: "exclamationmark.triangle")
+                    ContentUnavailableView {
+                        Label("Unable to Load", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button("Retry") { Task { await onRefresh() } }
+                            .buttonStyle(.borderedProminent)
+                    }
                 } else {
                     List {
                         if !accounts.isEmpty {

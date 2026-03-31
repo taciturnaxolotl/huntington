@@ -43,15 +43,13 @@ struct LoginView: View {
                     codeEntryBody
                 }
 
-                // Error
-                if let error = errorMessage {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.circle.fill")
-                        Text(error).font(.footnote)
-                    }
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
+                if let msg = errorMessage {
+                    Label(msg, systemImage: "exclamationmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
                 }
 
                 if phase != .credentials {
@@ -70,12 +68,24 @@ struct LoginView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-
             }
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
+            .onAppear {
+                if let reason = session.sessionError {
+                    errorMessage = reason
+                }
+            }
             .sheet(isPresented: $showForgotPassword) {
                 ForgotPasswordSheet()
+            }
+            .alert("Error", isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                if let msg = errorMessage { Text(msg) }
             }
         }
     }
